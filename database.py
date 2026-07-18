@@ -21,10 +21,16 @@ def init_db() -> None:
                 amount REAL NOT NULL,
                 category TEXT NOT NULL DEFAULT 'অন্যান্য',
                 note TEXT DEFAULT '',
+                necessity TEXT NOT NULL DEFAULT 'দরকারি',
                 created_at TEXT NOT NULL
             )
             """
         )
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(expenses)").fetchall()}
+        if "necessity" not in cols:
+            conn.execute(
+                "ALTER TABLE expenses ADD COLUMN necessity TEXT NOT NULL DEFAULT 'দরকারি'"
+            )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS budgets (
@@ -36,12 +42,21 @@ def init_db() -> None:
         conn.commit()
 
 
-def add_expense(user_id: int, amount: float, category: str, note: str = "") -> int:
+def add_expense(
+    user_id: int,
+    amount: float,
+    category: str,
+    note: str = "",
+    necessity: str = "দরকারি",
+) -> int:
     now = datetime.now().isoformat(timespec="seconds")
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO expenses (user_id, amount, category, note, created_at) VALUES (?, ?, ?, ?, ?)",
-            (user_id, amount, category, note, now),
+            """
+            INSERT INTO expenses (user_id, amount, category, note, necessity, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, amount, category, note, necessity, now),
         )
         conn.commit()
         return cur.lastrowid

@@ -21,11 +21,12 @@ load_dotenv()
     WAIT_ADD_AMOUNT,
     WAIT_ADD_CATEGORY,
     WAIT_ADD_NOTE,
+    WAIT_ADD_NECESSITY,
     WAIT_BUDGET,
     WAIT_EDIT_ID,
     WAIT_EDIT_DATA,
     WAIT_DELETE_ID,
-) = range(7)
+) = range(8)
 
 CATEGORIES = ["খাবার", "পরিবহন", "কেনাকাটা", "বিল", "বিনোদন", "অন্যান্য"]
 
@@ -36,8 +37,11 @@ BTN_BUDGET = "🎯 বাজেট সেট"
 BTN_EDIT = "✏️ এডিট"
 BTN_DELETE = "🗑 ডিলিট"
 BTN_REPORT = "📑 রিপোর্ট"
+BTN_VIEW_UNNECESSARY = "🔴 অদরকারি"
 BTN_CANCEL = "❌ বাতিল"
 BTN_SKIP_NOTE = "⏭ স্কিপ"
+BTN_NECESSARY = "✅ দরকারি"
+BTN_UNNECESSARY = "❌ অদরকারি"
 
 BN_DIGITS = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
 
@@ -47,8 +51,8 @@ def main_keyboard() -> ReplyKeyboardMarkup:
         [
             [KeyboardButton(BTN_ADD), KeyboardButton(BTN_TODAY)],
             [KeyboardButton(BTN_MONTH), KeyboardButton(BTN_BUDGET)],
+            [KeyboardButton(BTN_VIEW_UNNECESSARY), KeyboardButton(BTN_REPORT)],
             [KeyboardButton(BTN_EDIT), KeyboardButton(BTN_DELETE)],
-            [KeyboardButton(BTN_REPORT)],
         ],
         resize_keyboard=True,
     )
@@ -80,15 +84,30 @@ def note_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def necessity_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(BTN_NECESSARY), KeyboardButton(BTN_UNNECESSARY)],
+            [KeyboardButton(BTN_CANCEL)],
+        ],
+        resize_keyboard=True,
+    )
+
+
 def format_list(rows, title: str) -> str:
     if not rows:
         return f"{title}\n\nকোনো খরচ নেই।"
     lines = [title, ""]
     for r in rows:
         note = f" — {r['note']}" if r["note"] else ""
-        lines.append(f"#{r['id']} ৳{r['amount']:.0f} | {r['category']}{note}")
+        nec = r["necessity"] if "necessity" in r.keys() else "দরকারি"
+        tag = "🔴" if nec == "অদরকারি" else "🟢"
+        lines.append(f"#{r['id']} ৳{r['amount']:.0f} | {r['category']} {tag}{nec}{note}")
     lines.append("")
     lines.append(f"মোট: ৳{db.sum_amounts(rows):.0f}")
+    unnecessary = sum(float(r["amount"]) for r in rows if r["necessity"] == "অদরকারি")
+    if unnecessary > 0:
+        lines.append(f"অদরকারি: ৳{unnecessary:.0f}")
     return "\n".join(lines)
 
 
@@ -127,21 +146,24 @@ async def save_expense(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     amount = context.user_data["add_amount"]
     category = context.user_data["add_category"]
     note = context.user_data.get("add_note", "")
+    necessity = context.user_data.get("add_necessity", "দরকারি")
 
-    eid = db.add_expense(user_id, amount, category, note)
+    eid = db.add_expense(user_id, amount, category, note, necessity)
     month_total = db.sum_amounts(db.get_month_expenses(user_id))
     budget = db.get_budget(user_id)
     warn = "\n⚠️ মাসিক বাজেট অতিক্রম হয়েছে!" if budget > 0 and month_total > budget else ""
+    tip = "\n💡 অদরকারি খরচ কমানোর চেষ্টা করুন।" if necessity == "অদরকারি" else ""
 
     await update.message.reply_text(
-        f"যোগ হয়েছে #{eid}\n৳{amount:.0f} | {category}"
+        f"যোগ হয়েছে #{eid}\n৳{amount:.0f} | {category} | {necessity}"
         + (f" — {note}" if note else "")
-        + f"\nএই মাসের মোট: ৳{month_total:.0f}{warn}",
+        + f"\nএই মাসের মোট: ৳{month_total:.0f}{warn}{tip}",
         reply_markup=main_keyboard(),
     )
     context.user_data.pop("add_amount", None)
     context.user_data.pop("add_category", None)
     context.user_data.pop("add_note", None)
+    context.user_data.pop("add_necessity", None)
     return ConversationHandler.END
 
 
@@ -169,6 +191,16 @@ async def show_month(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
+async def show_unnecessary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    rows = db.get_month_expenses(update.effective_user.id)
+    rows = [r for r in rows if r["necessity"] == "অদরকারি"]
+    now = datetime.now()
+    await update.message.reply_text(
+        format_list(rows, f"🔴 অদরকারি খরচ ({now.year}-{now.month:02d})"),
+        reply_markup=main_keyboard(),
+    )
+
+
 async def show_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     rows = db.get_month_expenses(user_id)
@@ -187,6 +219,10 @@ async def show_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         lines.append(f"বাকি: ৳{left:.0f}")
         if total > budget:
             lines.append("⚠️ বাজেট অতিক্রম হয়েছে!")
+    necessary = sum(float(r["amount"]) for r in rows if r["necessity"] == "দরকারি")
+    unnecessary = sum(float(r["amount"]) for r in rows if r["necessity"] == "অদরকারি")
+    lines.append(f"দরকারি: ৳{necessary:.0f}")
+    lines.append(f"অদরকারি: ৳{unnecessary:.0f}")
     lines.append("")
     lines.append("ক্যাটাগরি:")
     if breakdown:
@@ -257,6 +293,29 @@ async def receive_add_note(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         context.user_data["add_note"] = ""
     else:
         context.user_data["add_note"] = text
+
+    await update.message.reply_text(
+        "এই খরচটা দরকারি নাকি অদরকারি?",
+        reply_markup=necessity_keyboard(),
+    )
+    return WAIT_ADD_NECESSITY
+
+
+async def receive_add_necessity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = (update.message.text or "").strip()
+    if text == BTN_CANCEL:
+        return await cancel(update, context)
+
+    if text == BTN_NECESSARY:
+        context.user_data["add_necessity"] = "দরকারি"
+    elif text == BTN_UNNECESSARY:
+        context.user_data["add_necessity"] = "অদরকারি"
+    else:
+        await update.message.reply_text(
+            "বাটন থেকে বেছে নিন।",
+            reply_markup=necessity_keyboard(),
+        )
+        return WAIT_ADD_NECESSITY
 
     return await save_expense(update, context)
 
@@ -395,6 +454,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.pop("add_amount", None)
     context.user_data.pop("add_category", None)
     context.user_data.pop("add_note", None)
+    context.user_data.pop("add_necessity", None)
     await update.message.reply_text("বাতিল।", reply_markup=main_keyboard())
     return ConversationHandler.END
 
@@ -409,6 +469,9 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         return ConversationHandler.END
     if text == BTN_MONTH:
         await show_month(update, context)
+        return ConversationHandler.END
+    if text == BTN_VIEW_UNNECESSARY:
+        await show_unnecessary(update, context)
         return ConversationHandler.END
     if text == BTN_BUDGET:
         return await ask_budget(update, context)
@@ -451,6 +514,7 @@ def main() -> None:
             WAIT_ADD_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_add_amount)],
             WAIT_ADD_CATEGORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_add_category)],
             WAIT_ADD_NOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_add_note)],
+            WAIT_ADD_NECESSITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_add_necessity)],
             WAIT_BUDGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_budget)],
             WAIT_EDIT_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_edit_id)],
             WAIT_EDIT_DATA: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_edit_data)],
