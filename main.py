@@ -46,6 +46,42 @@ BTN_UNNECESSARY = "❌ অদরকারি"
 BN_DIGITS = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
 
 
+async def safe_delete(bot, chat_id: int, message_id: int | None) -> None:
+    if not message_id:
+        return
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+
+async def wipe_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """ইউজার + আগের বট মেসেজ মুছে ফেলে।"""
+    chat_id = update.effective_chat.id
+    await safe_delete(context.bot, chat_id, update.message.message_id)
+    await safe_delete(context.bot, chat_id, context.user_data.pop("last_bot_msg", None))
+
+
+async def send_prompt(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    reply_markup=None,
+    parse_mode: str | None = None,
+):
+    kwargs = {"reply_markup": reply_markup}
+    if parse_mode:
+        kwargs["parse_mode"] = parse_mode
+    msg = await context.bot.send_message(chat_id=update.effective_chat.id, text=text, **kwargs)
+    context.user_data["last_bot_msg"] = msg.message_id
+    return msg
+
+
+def clear_add_data(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for key in ("add_amount", "add_category", "add_note", "add_necessity", "last_bot_msg", "edit_id"):
+        context.user_data.pop(key, None)
+
+
 def main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
@@ -148,22 +184,24 @@ async def save_expense(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     note = context.user_data.get("add_note", "")
     necessity = context.user_data.get("add_necessity", "দরকারি")
 
+    await wipe_step(update, context)
+
     eid = db.add_expense(user_id, amount, category, note, necessity)
     month_total = db.sum_amounts(db.get_month_expenses(user_id))
     budget = db.get_budget(user_id)
     warn = "\n⚠️ মাসিক বাজেট অতিক্রম হয়েছে!" if budget > 0 and month_total > budget else ""
     tip = "\n💡 অদরকারি খরচ কমানোর চেষ্টা করুন।" if necessity == "অদরকারি" else ""
 
-    await update.message.reply_text(
-        f"যোগ হয়েছে #{eid}\n৳{amount:.0f} | {category} | {necessity}"
-        + (f" — {note}" if note else "")
-        + f"\nএই মাসের মোট: ৳{month_total:.0f}{warn}{tip}",
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=(
+            f"যোগ হয়েছে #{eid}\n৳{amount:.0f} | {category} | {necessity}"
+            + (f" — {note}" if note else "")
+            + f"\nএই মাসের মোট: ৳{month_total:.0f}{warn}{tip}"
+        ),
         reply_markup=main_keyboard(),
     )
-    context.user_data.pop("add_amount", None)
-    context.user_data.pop("add_category", None)
-    context.user_data.pop("add_note", None)
-    context.user_data.pop("add_necessity", None)
+    clear_add_data(context)
     return ConversationHandler.END
 
 
@@ -234,10 +272,13 @@ async def show_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def ask_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text(
+    await wipe_step(update, context)
+    await send_prompt(
+        update,
+        context,
         "কত টাকা খরচ হয়েছে?\nউদাহরণ: `500` বা `৫০০`",
-        parse_mode="Markdown",
         reply_markup=cancel_keyboard(),
+        parse_mode="Markdown",
     )
     return WAIT_ADD_AMOUNT
 
@@ -248,17 +289,22 @@ async def receive_add_amount(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return await cancel(update, context)
 
     amount = parse_amount(text)
+    await wipe_step(update, context)
     if amount is None:
-        await update.message.reply_text(
+        await send_prompt(
+            update,
+            context,
             "শুধু সংখ্যা দিন। উদাহরণ: `500` বা `৫০০`",
-            parse_mode="Markdown",
             reply_markup=cancel_keyboard(),
+            parse_mode="Markdown",
         )
         return WAIT_ADD_AMOUNT
 
     context.user_data["add_amount"] = amount
-    await update.message.reply_text(
-        f"৳{amount:.0f}\n\nক্যাটাগরি বেছে নিন:",
+    await send_prompt(
+        update,
+        context,
+        "ক্যাটাগরি বেছে নিন:",
         reply_markup=category_keyboard(),
     )
     return WAIT_ADD_CATEGORY
@@ -269,15 +315,20 @@ async def receive_add_category(update: Update, context: ContextTypes.DEFAULT_TYP
     if text == BTN_CANCEL:
         return await cancel(update, context)
 
+    await wipe_step(update, context)
     if text not in CATEGORIES:
-        await update.message.reply_text(
+        await send_prompt(
+            update,
+            context,
             "বাটন থেকে ক্যাটাগরি বেছে নিন।",
             reply_markup=category_keyboard(),
         )
         return WAIT_ADD_CATEGORY
 
     context.user_data["add_category"] = text
-    await update.message.reply_text(
+    await send_prompt(
+        update,
+        context,
         "কারণ লিখুন (ঐচ্ছিক):",
         reply_markup=note_keyboard(),
     )
@@ -294,7 +345,10 @@ async def receive_add_note(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     else:
         context.user_data["add_note"] = text
 
-    await update.message.reply_text(
+    await wipe_step(update, context)
+    await send_prompt(
+        update,
+        context,
         "এই খরচটা দরকারি নাকি অদরকারি?",
         reply_markup=necessity_keyboard(),
     )
@@ -311,7 +365,10 @@ async def receive_add_necessity(update: Update, context: ContextTypes.DEFAULT_TY
     elif text == BTN_UNNECESSARY:
         context.user_data["add_necessity"] = "অদরকারি"
     else:
-        await update.message.reply_text(
+        await wipe_step(update, context)
+        await send_prompt(
+            update,
+            context,
             "বাটন থেকে বেছে নিন।",
             reply_markup=necessity_keyboard(),
         )
@@ -321,8 +378,11 @@ async def receive_add_necessity(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def ask_budget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await wipe_step(update, context)
     current = db.get_budget(update.effective_user.id)
-    await update.message.reply_text(
+    await send_prompt(
+        update,
+        context,
         f"বর্তমান মাসিক বাজেট: ৳{current:.0f}\n\nনতুন বাজেট লিখুন (শুধু সংখ্যা):",
         reply_markup=cancel_keyboard(),
     )
@@ -330,19 +390,25 @@ async def ask_budget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def ask_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text(
+    await wipe_step(update, context)
+    await send_prompt(
+        update,
+        context,
         "এডিট করতে খরচের ID দিন:\nউদাহরণ: `12`",
-        parse_mode="Markdown",
         reply_markup=cancel_keyboard(),
+        parse_mode="Markdown",
     )
     return WAIT_EDIT_ID
 
 
 async def ask_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text(
+    await wipe_step(update, context)
+    await send_prompt(
+        update,
+        context,
         "ডিলিট করতে খরচের ID দিন:\nউদাহরণ: `12`",
-        parse_mode="Markdown",
         reply_markup=cancel_keyboard(),
+        parse_mode="Markdown",
     )
     return WAIT_DELETE_ID
 
@@ -353,19 +419,24 @@ async def receive_budget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return await cancel(update, context)
 
     amount = parse_amount(text)
+    await wipe_step(update, context)
     if amount is None:
-        await update.message.reply_text(
+        await send_prompt(
+            update,
+            context,
             "শুধু সংখ্যা দিন। উদাহরণ: `15000` বা `১৫০০০`",
-            parse_mode="Markdown",
             reply_markup=cancel_keyboard(),
+            parse_mode="Markdown",
         )
         return WAIT_BUDGET
 
     db.set_budget(update.effective_user.id, amount)
-    await update.message.reply_text(
-        f"বাজেট সেট: ৳{amount:.0f}",
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=f"বাজেট সেট: ৳{amount:.0f}",
         reply_markup=main_keyboard(),
     )
+    context.user_data.pop("last_bot_msg", None)
     return ConversationHandler.END
 
 
@@ -375,27 +446,36 @@ async def receive_edit_id(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return await cancel(update, context)
 
     text = text.translate(BN_DIGITS).lstrip("#")
+    await wipe_step(update, context)
     if not text.isdigit():
-        await update.message.reply_text(
+        await send_prompt(
+            update,
+            context,
             "শুধু ID দিন। উদাহরণ: `12`",
-            parse_mode="Markdown",
             reply_markup=cancel_keyboard(),
+            parse_mode="Markdown",
         )
         return WAIT_EDIT_ID
 
     eid = int(text)
     row = db.get_expense(update.effective_user.id, eid)
     if not row:
-        await update.message.reply_text("এই ID পাওয়া যায়নি।", reply_markup=main_keyboard())
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="এই ID পাওয়া যায়নি।",
+            reply_markup=main_keyboard(),
+        )
         return ConversationHandler.END
 
     context.user_data["edit_id"] = eid
-    await update.message.reply_text(
+    await send_prompt(
+        update,
+        context,
         f"বর্তমান: #{row['id']} ৳{row['amount']:.0f} | {row['category']}"
         + (f" — {row['note']}" if row["note"] else "")
         + "\n\nনতুন মান লিখুন (যেমন: `300 পরিবহন অফিস`):",
-        parse_mode="Markdown",
         reply_markup=cancel_keyboard(),
+        parse_mode="Markdown",
     )
     return WAIT_EDIT_DATA
 
@@ -406,11 +486,14 @@ async def receive_edit_data(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return await cancel(update, context)
 
     parsed = parse_expense_text(text)
+    await wipe_step(update, context)
     if not parsed:
-        await update.message.reply_text(
+        await send_prompt(
+            update,
+            context,
             "সঠিক ফরম্যাট নয়। উদাহরণ: `300 পরিবহন`",
-            parse_mode="Markdown",
             reply_markup=cancel_keyboard(),
+            parse_mode="Markdown",
         )
         return WAIT_EDIT_DATA
 
@@ -418,12 +501,19 @@ async def receive_edit_data(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     amount, category, note = parsed
     ok = db.update_expense(update.effective_user.id, eid, amount, category, note)
     if not ok:
-        await update.message.reply_text("আপডেট ব্যর্থ।", reply_markup=main_keyboard())
-    else:
-        await update.message.reply_text(
-            f"আপডেট হয়েছে #{eid}\n৳{amount:.0f} | {category}",
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="আপডেট ব্যর্থ।",
             reply_markup=main_keyboard(),
         )
+    else:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"আপডেট হয়েছে #{eid}\n৳{amount:.0f} | {category}",
+            reply_markup=main_keyboard(),
+        )
+    context.user_data.pop("edit_id", None)
+    context.user_data.pop("last_bot_msg", None)
     return ConversationHandler.END
 
 
@@ -433,29 +523,37 @@ async def receive_delete_id(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return await cancel(update, context)
 
     text = text.translate(BN_DIGITS).lstrip("#")
+    await wipe_step(update, context)
     if not text.isdigit():
-        await update.message.reply_text(
+        await send_prompt(
+            update,
+            context,
             "শুধু ID দিন। উদাহরণ: `12`",
-            parse_mode="Markdown",
             reply_markup=cancel_keyboard(),
+            parse_mode="Markdown",
         )
         return WAIT_DELETE_ID
 
     eid = int(text)
     ok = db.delete_expense(update.effective_user.id, eid)
-    if ok:
-        await update.message.reply_text(f"ডিলিট হয়েছে #{eid}", reply_markup=main_keyboard())
-    else:
-        await update.message.reply_text("এই ID পাওয়া যায়নি।", reply_markup=main_keyboard())
+    msg = f"ডিলিট হয়েছে #{eid}" if ok else "এই ID পাওয়া যায়নি।"
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=msg,
+        reply_markup=main_keyboard(),
+    )
+    context.user_data.pop("last_bot_msg", None)
     return ConversationHandler.END
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data.pop("add_amount", None)
-    context.user_data.pop("add_category", None)
-    context.user_data.pop("add_note", None)
-    context.user_data.pop("add_necessity", None)
-    await update.message.reply_text("বাতিল।", reply_markup=main_keyboard())
+    await wipe_step(update, context)
+    clear_add_data(context)
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="বাতিল।",
+        reply_markup=main_keyboard(),
+    )
     return ConversationHandler.END
 
 
